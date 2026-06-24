@@ -1,0 +1,99 @@
+name: Bug report
+description: Report a reproducible problem in Snoy-RawBridge
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug.
+        Please fill in as much detail as possible, especially camera model, Android phone model, USB mode, and repro steps.
+
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: A short description of the bug
+      placeholder: Import stops after selecting RAW files
+    validations:
+      required: true
+
+  - type: input
+    id: camera_model
+    attributes:
+      label: Camera model
+      description: Example: Sony A7M3
+      placeholder: Sony A7M3
+    validations:
+      required: true
+
+  - type: input
+    id: phone_model
+    attributes:
+      label: Phone model
+      description: Example: Xiaomi 14 / Pixel 8 / Galaxy S24
+      placeholder: Pixel 8
+    validations:
+      required: true
+
+  - type: input
+    id: android_version
+    attributes:
+      label: Android version
+      placeholder: Android 14
+    validations:
+      required: true
+
+  - type: dropdown
+    id: usb_mode
+    attributes:
+      label: USB mode
+      options:
+        - MTP
+        - PTP
+        - Unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Tell us exactly how to reproduce the issue
+      placeholder: |
+        1. Connect camera with USB
+        2. Open app
+        3. Enter multi-select mode
+        4. Tap import
+        5. Observe failure
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: Selected RAW files should start importing
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      placeholder: App shows ready state but import never begins
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or screen recording
+      description: Optional, but very helpful for UI or state issues
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional notes
+      description: Cable type, OTG adapter, connection timing, anything unusual

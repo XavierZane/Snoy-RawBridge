@@ -1,0 +1,41 @@
+name: Feature request
+description: Suggest an improvement for Snoy-RawBridge
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion.
+        Please describe the user problem first, then the feature idea.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What user problem or workflow gap does this address?
+      placeholder: It is hard to quickly identify imported files during a large batch session
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the feature you want
+      placeholder: Add an imported badge overlay on thumbnails after successful import
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any workaround or alternative approach you already considered
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Camera model, workflow scenario, screenshots, or references

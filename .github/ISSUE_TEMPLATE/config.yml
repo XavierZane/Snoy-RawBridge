@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Usage documentation
+    url: https://github.com/XavierZane/Snoy-RawBridge/blob/main/%E4%BD%BF%E7%94%A8%E6%96%87%E6%A1%A3.md
+    about: Read the usage guide before opening an issue for setup or expected workflow questions.

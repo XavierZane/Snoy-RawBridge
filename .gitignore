@@ -1,0 +1,16 @@
+.gradle/
+.gradle-dist/
+.idea/
+.kotlin/
+.tmp-inspect/
+build/
+local.properties
+app/build/
+transfer-backend/build/
+开发文档/
+*.jks
+*.keystore
+keystore.properties
+rawbridge-*.png
+rawbridge-*.xml
+rawbridge_ui.xml
