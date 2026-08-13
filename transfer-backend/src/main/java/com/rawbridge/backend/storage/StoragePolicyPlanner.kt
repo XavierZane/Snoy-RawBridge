@@ -6,8 +6,19 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 object StoragePolicyPlanner {
+    private const val DefaultSaveRoot = "Pictures/RAWBridge"
     private val dateFolderFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
     private val conflictStampFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")
+    private val publicRootSegments = setOf(
+        "pictures",
+        "dcim",
+        "download",
+        "documents",
+        "movies",
+        "music",
+        "podcasts",
+    )
+    private val imagePublicRootSegments = setOf("pictures", "dcim")
 
     fun detectFileType(fileName: String): StoredFileType {
         return when (fileName.substringAfterLast('.', "").lowercase()) {
@@ -23,10 +34,7 @@ object StoragePolicyPlanner {
         receivedAt: Instant = Instant.now(),
         zoneId: ZoneId = ZoneId.systemDefault(),
     ): String {
-        val normalizedRoot = settings.saveRoot
-            .trim()
-            .trim('/')
-            .replace('\\', '/')
+        val normalizedRoot = normalizeSaveRoot(settings.saveRoot)
         val segments = mutableListOf(normalizedRoot)
 
         if (settings.autoCreateDateFolder) {
@@ -42,6 +50,49 @@ object StoragePolicyPlanner {
         }
 
         return segments.filter { it.isNotBlank() }.joinToString(separator = "/", postfix = "/")
+    }
+
+    fun normalizeSaveRoot(saveRoot: String): String {
+        val normalized = saveRoot
+            .trim()
+            .replace('\\', '/')
+            .replace(Regex("/+"), "/")
+            .trim('/')
+
+        if (normalized.isBlank()) {
+            return DefaultSaveRoot
+        }
+
+        val lowered = normalized.lowercase()
+        if (
+            ':' in normalized ||
+            normalized.startsWith("/") ||
+            lowered.startsWith("storage/") ||
+            lowered.startsWith("sdcard/") ||
+            lowered.startsWith("mnt/") ||
+            lowered.startsWith("data/")
+        ) {
+            return DefaultSaveRoot
+        }
+
+        val firstSegment = normalized.substringBefore('/').lowercase()
+        return if (firstSegment in publicRootSegments) {
+            normalized
+        } else {
+            "Pictures/$normalized"
+        }
+    }
+
+    fun mediaStoreCollectionKind(
+        fileType: StoredFileType,
+        relativePath: String,
+    ): StorageMediaCollection {
+        val root = relativePath.trimStart('/').substringBefore('/').lowercase()
+        return if (root in imagePublicRootSegments) {
+            StorageMediaCollection.Images
+        } else {
+            StorageMediaCollection.Files
+        }
     }
 
     fun resolveConflict(
@@ -69,4 +120,9 @@ object StoragePolicyPlanner {
             attempt += 1
         }
     }
+}
+
+enum class StorageMediaCollection {
+    Images,
+    Files,
 }

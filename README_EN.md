@@ -16,7 +16,7 @@
 
 Snoy-RawBridge is an Android app for browsing Sony camera media over USB and importing selected RAW / JPEG originals on demand.
 
-It is built around a wired workflow with thumbnail-first browsing, MTP as the primary path, PTP as a compatibility path, and no full-card mirroring to the phone.
+It is built around a wired workflow with thumbnail-first browsing, MTP as the only transfer path, and no full-card mirroring to the phone.
 
 ## Overview
 
@@ -34,7 +34,7 @@ This keeps the experience closer to a utility tool:
 
 - Wired USB workflow for Android USB Host / OTG devices
 - Sony camera oriented media browsing and import flow
-- MTP-first design with PTP compatibility retained
+- MTP-only transfer mode
 - Thumbnail-first gallery rendering for RAW and JPEG media
 - Multi-select, filtered selection, and batch import
 - Import progress, stop action, and history records
@@ -94,7 +94,7 @@ adb install -r app\build\outputs\apk\release\app-release.apk
 - Jetpack Compose
 - Material 3
 - Android USB Host APIs
-- MTP / PTP browse and import flow
+- MTP browse and import flow
 - Room
 - DataStore
 - Coil
@@ -110,8 +110,7 @@ icon.svg            Source icon asset
 
 ## Compatibility Notes
 
-- MTP is the primary and recommended path.
-- PTP is retained as a compatibility path and may vary by camera model or USB mode.
+- MTP is the only supported and recommended transfer mode.
 - Large media cards still depend on camera-side enumeration speed, even with incremental thumbnail publishing.
 
 ## Author

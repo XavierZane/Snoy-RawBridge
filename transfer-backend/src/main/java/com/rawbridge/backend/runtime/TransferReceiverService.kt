@@ -11,6 +11,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.rawbridge.backend.TransferBackendGraph
 import com.rawbridge.backend.config.ReceiverSettings
+import com.rawbridge.backend.debug.UsbDebugLogger
 import com.rawbridge.backend.history.SessionLifecycleStatus
 import com.rawbridge.backend.platform.UsbConnectionSnapshot
 import com.rawbridge.backend.platform.usb.UsbImportSessionEvent
@@ -36,12 +37,14 @@ class TransferReceiverService : Service() {
     private var stateJob: Job? = null
     private var eventJob: Job? = null
     private var usbSnapshotJob: Job? = null
+    private var catalogJob: Job? = null
 
     private var activeSettings: ReceiverSettings? = null
     private var sessionTracker: TransferSessionTracker? = null
     private var pendingImportCaptureIds: List<String>? = null
     private var lastObservedState: UsbImportSessionState = UsbImportSessionState.Stopped
     private var pendingStoppedRuntimeState: ReceiverRuntimeState? = null
+    private var shouldFinalizeCompletedSession: Boolean = false
 
     override fun onCreate() {
         super.onCreate()
@@ -49,6 +52,7 @@ class TransferReceiverService : Service() {
         observeSessionState()
         observeSessionEvents()
         observeUsbSnapshots()
+        observeCatalog()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -69,6 +73,7 @@ class TransferReceiverService : Service() {
         stateJob?.cancel()
         eventJob?.cancel()
         usbSnapshotJob?.cancel()
+        catalogJob?.cancel()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -82,7 +87,8 @@ class TransferReceiverService : Service() {
                 if (previousState is UsbImportSessionState.Importing &&
                     state is UsbImportSessionState.Ready
                 ) {
-                    finalizeActiveSession(status = SessionLifecycleStatus.Completed)
+                    shouldFinalizeCompletedSession = true
+                    maybeFinalizeCompletedSession()
                 }
 
                 if (state is UsbImportSessionState.Error) {
@@ -106,6 +112,7 @@ class TransferReceiverService : Service() {
 
                 if (state is UsbImportSessionState.Ready) {
                     consumePendingImportIfReady()
+                    maybeFinalizeCompletedSession()
                 }
             }
         }
@@ -168,9 +175,37 @@ class TransferReceiverService : Service() {
         }
     }
 
+    private fun observeCatalog() {
+        catalogJob = serviceScope.launch {
+            graph.usbImportSessionEngine.catalog.collect { catalog ->
+                if (catalog.isNotEmpty() && pendingImportCaptureIds != null) {
+                    UsbDebugLogger.d(
+                        DebugTag,
+                        "catalog published count=${catalog.size} action=consumePendingImport",
+                    )
+                    consumePendingImportIfReady()
+                }
+            }
+        }
+    }
+
     private fun startReceiver() {
         serviceScope.launch {
-            ensureReceiverSessionStarted()
+            runCatching {
+                ensureReceiverSessionStarted()
+            }.onFailure { error ->
+                UsbDebugLogger.e(DebugTag, "service startReceiver failed", error)
+                publishRuntimeState(
+                    ReceiverRuntimeState(
+                        status = ReceiverServiceStatus.Error,
+                        connectedDeviceName = latestConnectedDeviceName(),
+                        usbModeLabel = latestUsbModeLabel(),
+                        message = error.message ?: "启动 USB 会话失败。",
+                    ),
+                )
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
         }
     }
 
@@ -194,19 +229,33 @@ class TransferReceiverService : Service() {
 
     private fun refreshCatalog() {
         serviceScope.launch {
-            when (graph.usbImportSessionEngine.state.value) {
-                UsbImportSessionState.Stopped,
-                is UsbImportSessionState.Error,
-                -> {
-                    if (ensureReceiverSessionStarted()) {
-                        graph.usbImportSessionEngine.refreshCatalog()
+            runCatching {
+                when (graph.usbImportSessionEngine.state.value) {
+                    UsbImportSessionState.Stopped,
+                    is UsbImportSessionState.Error,
+                    -> {
+                        if (ensureReceiverSessionStarted()) {
+                            graph.usbImportSessionEngine.refreshCatalog()
+                        }
                     }
-                }
 
-                is UsbImportSessionState.Starting -> Unit
-                is UsbImportSessionState.Ready,
-                is UsbImportSessionState.Importing,
-                -> graph.usbImportSessionEngine.refreshCatalog()
+                    is UsbImportSessionState.Starting -> Unit
+                    is UsbImportSessionState.Ready,
+                    is UsbImportSessionState.Importing,
+                    -> graph.usbImportSessionEngine.refreshCatalog()
+                }
+            }.onFailure { error ->
+                UsbDebugLogger.e(DebugTag, "service refreshCatalog failed", error)
+                publishRuntimeState(
+                    ReceiverRuntimeState(
+                        status = ReceiverServiceStatus.Error,
+                        connectedDeviceName = latestConnectedDeviceName(),
+                        usbModeLabel = latestUsbModeLabel(),
+                        message = error.message ?: "刷新相机图库失败。",
+                    ),
+                )
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
             }
         }
     }
@@ -214,25 +263,46 @@ class TransferReceiverService : Service() {
     private fun importSelected(captureIds: List<String>) {
         if (captureIds.isEmpty()) return
 
+        UsbDebugLogger.d(
+            DebugTag,
+            "service importSelected requested count=${captureIds.size} ids=${captureIds.joinToString(prefix = "[", postfix = "]")}",
+        )
         serviceScope.launch {
             when (graph.usbImportSessionEngine.state.value) {
                 UsbImportSessionState.Stopped,
                 is UsbImportSessionState.Error,
                 -> {
+                    UsbDebugLogger.d(
+                        DebugTag,
+                        "service importSelected state=StoppedOrError action=startReceiver",
+                    )
                     pendingImportCaptureIds = captureIds
                     ensureReceiverSessionStarted()
                 }
 
                 is UsbImportSessionState.Starting -> {
+                    UsbDebugLogger.d(
+                        DebugTag,
+                        "service importSelected state=Starting action=queuePending",
+                    )
                     pendingImportCaptureIds = captureIds
                 }
 
                 is UsbImportSessionState.Ready -> {
+                    UsbDebugLogger.d(
+                        DebugTag,
+                        "service importSelected state=Ready action=consumePending",
+                    )
                     pendingImportCaptureIds = captureIds
                     consumePendingImportIfReady()
                 }
 
-                is UsbImportSessionState.Importing -> Unit
+                is UsbImportSessionState.Importing -> {
+                    UsbDebugLogger.d(
+                        DebugTag,
+                        "service importSelected state=Importing action=ignore",
+                    )
+                }
             }
         }
     }
@@ -259,6 +329,10 @@ class TransferReceiverService : Service() {
         )
         TransferRuntimeBus.publish(startingState)
         startForeground(NotificationId, buildNotification(startingState))
+        UsbDebugLogger.d(
+            DebugTag,
+            "ensureReceiverSessionStarted mode=${settings.usbModePreference.name}",
+        )
 
         val snapshot = graph.usbConnectionMonitor.refresh(settings.usbModePreference)
         if (!snapshot.isReadyToBrowse) {
@@ -275,6 +349,10 @@ class TransferReceiverService : Service() {
             return false
         }
 
+        UsbDebugLogger.d(
+            DebugTag,
+            "ensureReceiverSessionStarted snapshot ready connected=${snapshot.isConnected} permission=${snapshot.hasPermission} mode=${snapshot.usbModeLabel.orEmpty()} backend=${snapshot.browseBackendLabel.orEmpty()}",
+        )
         graph.usbImportSessionEngine.start(
             UsbImportSessionStartRequest(settings = settings),
         )
@@ -284,6 +362,10 @@ class TransferReceiverService : Service() {
     private suspend fun consumePendingImportIfReady() {
         val pendingIds = pendingImportCaptureIds ?: return
         if (graph.usbImportSessionEngine.state.value !is UsbImportSessionState.Ready) {
+            UsbDebugLogger.d(
+                DebugTag,
+                "consumePendingImportIfReady skipped state=${graph.usbImportSessionEngine.state.value::class.simpleName}",
+            )
             return
         }
 
@@ -291,7 +373,11 @@ class TransferReceiverService : Service() {
             .map { it.id }
             .toSet()
         if (catalogIds.isEmpty()) {
-            graph.usbImportSessionEngine.refreshCatalog()
+            UsbDebugLogger.d(
+                DebugTag,
+                "consumePendingImportIfReady catalog-empty action=waitForBackgroundScan",
+            )
+            return
         }
 
         val importIds = pendingIds
@@ -300,16 +386,57 @@ class TransferReceiverService : Service() {
         pendingImportCaptureIds = null
 
         if (importIds.isEmpty()) {
+            UsbDebugLogger.w(
+                DebugTag,
+                "consumePendingImportIfReady no-valid-ids pending=${pendingIds.joinToString(prefix = "[", postfix = "]")}",
+            )
+            recordRejectedImport(
+                captureIds = pendingIds,
+                reason = "所选文件已不在当前相机图库中，请重新扫描后再试。",
+            )
             return
         }
 
+        UsbDebugLogger.d(
+            DebugTag,
+            "consumePendingImportIfReady importIds=${importIds.joinToString(prefix = "[", postfix = "]")}",
+        )
         val settings = activeSettings ?: graph.settingsRepository.current().also { activeSettings = it }
         val tracker = TransferSessionTracker(settings = settings).apply {
             startBatch(importIds.size)
         }
+        shouldFinalizeCompletedSession = false
         sessionTracker = tracker
         graph.historyRepository.upsertSession(tracker.runningSession())
         graph.usbImportSessionEngine.importSelected(importIds)
+    }
+
+    private suspend fun recordRejectedImport(
+        captureIds: List<String>,
+        reason: String,
+    ) {
+        val settings = activeSettings ?: graph.settingsRepository.current().also { activeSettings = it }
+        val tracker = TransferSessionTracker(settings = settings).apply {
+            startBatch(captureIds.size)
+        }
+        graph.historyRepository.upsertSession(tracker.runningSession())
+        captureIds.forEach { captureId ->
+            graph.historyRepository.appendRecord(
+                tracker.recordFailure(
+                    UsbImportSessionEvent.FileImportFailed(
+                        captureId = captureId,
+                        fileName = null,
+                        reason = reason,
+                    ),
+                ),
+            )
+        }
+        finalizeTracker(
+            tracker = tracker,
+            status = SessionLifecycleStatus.Failed,
+            lastErrorMessage = reason,
+        )
+        UsbDebugLogger.e(DebugTag, "import rejected: $reason")
     }
 
     private suspend fun persistImportedFile(event: UsbImportSessionEvent.FileImported) {
@@ -317,6 +444,10 @@ class TransferReceiverService : Service() {
         val stagingFile = File(event.stagingPath)
 
         try {
+            UsbDebugLogger.d(
+                DebugTag,
+                "persist imported file start captureId=${event.captureId} file=${event.fileName} staging=${event.stagingPath}",
+            )
             val savedFile = graph.incomingFileStore.saveIncomingFile(
                 request = SaveIncomingFileRequest(
                     settings = tracker.settings,
@@ -330,7 +461,17 @@ class TransferReceiverService : Service() {
             val record = tracker.recordSuccess(savedFile)
             graph.historyRepository.appendRecord(record)
             graph.historyRepository.upsertSession(tracker.runningSession())
+            UsbDebugLogger.d(
+                DebugTag,
+                "persist imported file success captureId=${event.captureId} file=${event.fileName} path=${savedFile.relativePath} uri=${savedFile.contentUri}",
+            )
+            maybeFinalizeCompletedSession()
         } catch (error: Throwable) {
+            UsbDebugLogger.e(
+                DebugTag,
+                "persist imported file failed captureId=${event.captureId} file=${event.fileName}",
+                error,
+            )
             val failedRecord = tracker.recordFailure(
                 UsbImportSessionEvent.FileImportFailed(
                     captureId = event.captureId,
@@ -342,6 +483,7 @@ class TransferReceiverService : Service() {
             )
             graph.historyRepository.appendRecord(failedRecord)
             graph.historyRepository.upsertSession(tracker.runningSession())
+            maybeFinalizeCompletedSession()
         } finally {
             stagingFile.delete()
         }
@@ -349,9 +491,28 @@ class TransferReceiverService : Service() {
 
     private suspend fun persistFailedImport(event: UsbImportSessionEvent.FileImportFailed) {
         val tracker = sessionTracker ?: return
+        UsbDebugLogger.e(
+            DebugTag,
+            "import failed captureId=${event.captureId} file=${event.fileName ?: "unknown"} reason=${event.reason}",
+        )
         val record = tracker.recordFailure(event)
         graph.historyRepository.appendRecord(record)
         graph.historyRepository.upsertSession(tracker.runningSession())
+        maybeFinalizeCompletedSession()
+    }
+
+    private suspend fun maybeFinalizeCompletedSession() {
+        val tracker = sessionTracker ?: return
+        if (!shouldFinalizeCompletedSession) return
+        if (tracker.completedCount() < tracker.totalCount()) {
+            UsbDebugLogger.d(
+                DebugTag,
+                "complete finalize deferred completed=${tracker.completedCount()} target=${tracker.totalCount()}",
+            )
+            return
+        }
+        shouldFinalizeCompletedSession = false
+        finalizeActiveSession(status = SessionLifecycleStatus.Completed)
     }
 
     private suspend fun finalizeActiveSession(
@@ -359,6 +520,16 @@ class TransferReceiverService : Service() {
         lastErrorMessage: String? = null,
     ) {
         val tracker = sessionTracker ?: return
+        finalizeTracker(tracker, status, lastErrorMessage)
+        sessionTracker = null
+        shouldFinalizeCompletedSession = false
+    }
+
+    private suspend fun finalizeTracker(
+        tracker: TransferSessionTracker,
+        status: SessionLifecycleStatus,
+        lastErrorMessage: String? = null,
+    ) {
         tracker.markError(lastErrorMessage)
         val finalSession = tracker.finishedSession(status)
         graph.historyRepository.finishSession(
@@ -371,7 +542,6 @@ class TransferReceiverService : Service() {
             finishedAtEpochMillis = finalSession.finishedAtEpochMillis ?: System.currentTimeMillis(),
             lastErrorMessage = finalSession.lastErrorMessage,
         )
-        sessionTracker = null
     }
 
     private fun publishRuntimeState(state: ReceiverRuntimeState) {
@@ -490,7 +660,7 @@ class TransferReceiverService : Service() {
             !hasPermission -> unavailableReason
                 ?: "\u68c0\u6d4b\u5230\u76f8\u673a\uff0c\u4f46\u8fd8\u6ca1\u6709 USB \u8bbf\u95ee\u6743\u9650\uff0c\u8bf7\u5728\u7cfb\u7edf\u5f39\u7a97\u4e2d\u6388\u6743\u3002"
             !isBrowsable -> unavailableReason
-                ?: "\u5f53\u524d USB \u6a21\u5f0f\u6682\u65f6\u4e0d\u53ef\u6d4f\u89c8\uff0c\u8bf7\u5207\u6362\u5230\u53d7\u652f\u6301\u7684 MTP/PTP \u6a21\u5f0f\u3002"
+                ?: "\u5f53\u524d USB \u6a21\u5f0f\u6682\u65f6\u4e0d\u53ef\u6d4f\u89c8\uff0c\u8bf7\u5207\u6362\u5230\u53d7\u652f\u6301\u7684 MTP \u6a21\u5f0f\u3002"
             else -> "\u5f53\u524d USB \u4f1a\u8bdd\u6682\u65f6\u4e0d\u53ef\u7528\u3002"
         }
     }
@@ -500,7 +670,7 @@ class TransferReceiverService : Service() {
             !isConnected -> "\u76f8\u673a\u5df2\u65ad\u5f00\uff0cUSB \u4f1a\u8bdd\u5df2\u7ed3\u675f\u3002"
             !hasPermission -> "\u5df2\u4e22\u5931 USB \u8bbf\u95ee\u6743\u9650\uff0c\u8bf7\u91cd\u65b0\u6388\u6743\u540e\u518d\u626b\u63cf\u3002"
             !isBrowsable -> unavailableReason
-                ?: "\u5f53\u524d USB \u6a21\u5f0f\u4e0d\u652f\u6301\u6d4f\u89c8\uff0c\u8bf7\u5207\u6362\u76f8\u673a\u5230 MTP/PTP \u540e\u91cd\u65b0\u626b\u63cf\u3002"
+                ?: "\u5f53\u524d USB \u6a21\u5f0f\u4e0d\u652f\u6301\u6d4f\u89c8\uff0c\u8bf7\u5207\u6362\u76f8\u673a\u5230 MTP \u540e\u91cd\u65b0\u626b\u63cf\u3002"
             else -> unavailableReason
                 ?: "\u5f53\u524d USB \u4f1a\u8bdd\u4e0d\u53ef\u7528\u3002"
         }
@@ -516,6 +686,7 @@ class TransferReceiverService : Service() {
     }
 
     companion object {
+        private const val DebugTag = "RawBridgeUsbDebug"
         private const val ChannelId = "rawbridge.receiver"
         private const val NotificationId = 62001
         private const val ActionStart = "com.rawbridge.backend.action.START_RECEIVER"

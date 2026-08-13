@@ -2,6 +2,7 @@ package com.rawbridge.app
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.Drawable
@@ -127,7 +128,10 @@ fun RawBridgeApp(
     val snackbarHostState = remember { SnackbarHostState() }
     val colors = MaterialTheme.colorScheme
     val showSecondaryTopBar = uiState.currentScreen == RawBridgeScreen.Setup &&
-        uiState.setupDestination == SetupDestination.About
+        (
+            uiState.setupDestination == SetupDestination.About ||
+                uiState.setupDestination == SetupDestination.UsbDebugLogs
+            )
 
     LaunchedSnackBar(uiState.snackbarMessage, snackbarHostState, viewModel::consumeSnackbar)
 
@@ -137,7 +141,13 @@ fun RawBridgeApp(
             if (showSecondaryTopBar) {
                 RawBridgeTopBar(
                     title = uiState.topBarSupportingText,
-                    onBack = viewModel::closeSetupAbout,
+                    onBack = {
+                        when (uiState.setupDestination) {
+                            SetupDestination.About -> viewModel.closeSetupAbout()
+                            SetupDestination.UsbDebugLogs -> viewModel.closeUsbDebugLogs()
+                            SetupDestination.Main -> Unit
+                        }
+                    },
                 )
             }
         },
@@ -186,6 +196,8 @@ fun RawBridgeApp(
                         onTestConnection = viewModel::runConnectionCheck,
                         onRefreshCatalog = viewModel::refreshCatalog,
                         onOpenAbout = viewModel::openSetupAbout,
+                        onOpenUsbDebugLogs = viewModel::openUsbDebugLogs,
+                        onClearUsbDebugLogs = viewModel::clearUsbDebugLogs,
                         onBackHome = { viewModel.selectScreen(RawBridgeScreen.Home) },
                     )
 
@@ -1484,11 +1496,14 @@ private fun SetupScreen(
     onTestConnection: () -> Unit,
     onRefreshCatalog: () -> Unit,
     onOpenAbout: () -> Unit,
+    onOpenUsbDebugLogs: () -> Unit,
+    onClearUsbDebugLogs: () -> Unit,
     onBackHome: () -> Unit,
 ) {
     val context = LocalContext.current
     val currentUsbMode = uiState.config.usbModeLabel ?: uiState.config.usbModePreference.name
     val connectedDevice = uiState.config.connectedDeviceName ?: "\u672a\u68c0\u6d4b\u5230\u8bbe\u5907"
+    val showUsbDebugEntry = context.isDebuggableApp()
 
     if (uiState.setupDestination == SetupDestination.About) {
         SetupAboutScreen(
@@ -1496,6 +1511,15 @@ private fun SetupScreen(
             deviceModel = deviceModelLabel(),
             githubUrl = RawBridgeGithubUrl,
             onOpenGithub = { openExternalLink(context, RawBridgeGithubUrl) },
+        )
+        return
+    }
+
+    if (uiState.setupDestination == SetupDestination.UsbDebugLogs) {
+        UsbDebugLogsScreen(
+            logs = uiState.usbDebugLogs,
+            onRefreshCatalog = onRefreshCatalog,
+            onClearLogs = onClearUsbDebugLogs,
         )
         return
     }
@@ -1665,6 +1689,17 @@ private fun SetupScreen(
             }
         }
 
+        if (showUsbDebugEntry) {
+            SurfaceCard {
+                SettingsActionRow(
+                    title = "USB 调试日志",
+                    icon = Icons.Outlined.Security,
+                    supportingText = "查看相机枚举返回值",
+                    onClick = onOpenUsbDebugLogs,
+                )
+            }
+        }
+
         ConnectionCheckBanner(state = uiState.connectionCheckState)
 
         Button(
@@ -1784,6 +1819,134 @@ private fun SetupAboutScreen(
             }
         }
 
+    }
+}
+
+@Composable
+private fun UsbDebugLogsScreen(
+    logs: List<UsbDebugLogLine>,
+    onRefreshCatalog: () -> Unit,
+    onClearLogs: () -> Unit,
+) {
+    ScrollScreen {
+        SurfaceCard {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "USB 调试日志",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "插上相机后点“重新扫描”，这里会显示相机枚举返回的文件名、格式码、缩略图结果和跳过原因。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    FilledTonalButton(
+                        onClick = onRefreshCatalog,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("重新扫描")
+                    }
+                    OutlinedButton(
+                        onClick = onClearLogs,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("清空日志")
+                    }
+                }
+            }
+        }
+
+        if (logs.isEmpty()) {
+            SurfaceCard {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Security,
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = "还没有调试日志",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = "连接相机并重新扫描后，这里会出现详细返回值。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+        } else {
+            SurfaceCard {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    logs.asReversed().forEach { line ->
+                        UsbDebugLogRow(line = line)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun UsbDebugLogRow(line: UsbDebugLogLine) {
+    val levelColor = when (line.level) {
+        "WARN" -> MaterialTheme.colorScheme.tertiaryContainer
+        "ERROR" -> MaterialTheme.colorScheme.errorContainer
+        else -> MaterialTheme.colorScheme.surfaceVariant
+    }
+    val levelContentColor = when (line.level) {
+        "WARN" -> MaterialTheme.colorScheme.onTertiaryContainer
+        "ERROR" -> MaterialTheme.colorScheme.onErrorContainer
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            MiniPill(
+                text = line.level,
+                containerColor = levelColor,
+                contentColor = levelContentColor,
+            )
+            Text(
+                text = line.time,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = line.tag,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        SelectionContainer {
+            Text(
+                text = line.message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+        HorizontalDivider()
     }
 }
 
@@ -2652,6 +2815,10 @@ private fun openExternalLink(context: Context, url: String) {
     context.startActivity(intent)
 }
 
+private fun Context.isDebuggableApp(): Boolean {
+    return applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+}
+
 private fun sharePlainText(context: Context, text: String) {
     val intent = Intent(Intent.ACTION_SEND).apply {
         type = "text/plain"
@@ -2719,6 +2886,7 @@ data class RawBridgeUiState(
     val historyFilter: HistoryFilter = HistoryFilter.All,
     val expandedRecordId: String? = null,
     val connectionNotice: ConnectionNotice? = null,
+    val usbDebugLogs: List<UsbDebugLogLine> = emptyList(),
     val snackbarMessage: String? = null,
 ) {
     val filteredCaptureLibrary: List<CapturePreviewItem>
@@ -2760,6 +2928,7 @@ data class RawBridgeUiState(
     val topBarSupportingText: String
         get() = when {
             currentScreen == RawBridgeScreen.Setup && setupDestination == SetupDestination.About -> "\u5173\u4e8e"
+            currentScreen == RawBridgeScreen.Setup && setupDestination == SetupDestination.UsbDebugLogs -> "USB 调试日志"
             else -> ""
         }
 }
@@ -2864,6 +3033,14 @@ data class TransferHistoryRecord(
     val message: String? = null,
 )
 
+data class UsbDebugLogLine(
+    val id: Long,
+    val time: String,
+    val level: String,
+    val tag: String,
+    val message: String,
+)
+
 enum class RawBridgeScreen(
     val label: String,
     val supportingText: String,
@@ -2877,6 +3054,7 @@ enum class RawBridgeScreen(
 enum class SetupDestination {
     Main,
     About,
+    UsbDebugLogs,
 }
 
 enum class ReceiverServiceState(val label: String) {

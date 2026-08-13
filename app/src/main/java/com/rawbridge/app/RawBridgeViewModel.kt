@@ -6,6 +6,9 @@ import androidx.lifecycle.viewModelScope
 import com.rawbridge.backend.TransferBackend
 import com.rawbridge.backend.config.ReceiverSettings
 import com.rawbridge.backend.config.UsbModePreference
+import com.rawbridge.backend.debug.UsbDebugLogEntry
+import com.rawbridge.backend.debug.UsbDebugLogLevel
+import com.rawbridge.backend.debug.UsbDebugLogger
 import com.rawbridge.backend.history.SessionLifecycleStatus
 import com.rawbridge.backend.history.TransferFileRecord
 import com.rawbridge.backend.history.TransferRecordStatus
@@ -14,16 +17,20 @@ import com.rawbridge.backend.platform.UsbConnectionSnapshot
 import com.rawbridge.backend.platform.usb.UsbCameraCatalogItem
 import com.rawbridge.backend.runtime.ReceiverRuntimeState
 import com.rawbridge.backend.runtime.ReceiverServiceStatus
+import com.rawbridge.backend.storage.StoragePolicyPlanner
 import com.rawbridge.backend.storage.StoredFileType
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class RawBridgeViewModel(
     private val transferBackend: TransferBackend,
@@ -51,6 +58,7 @@ class RawBridgeViewModel(
         observeHistoryRecords()
         observeSessions()
         observeCatalog()
+        observeUsbDebugLogs()
     }
 
     fun selectScreen(screen: RawBridgeScreen) {
@@ -73,6 +81,23 @@ class RawBridgeViewModel(
 
     fun closeSetupAbout() {
         _uiState.update { it.copy(setupDestination = SetupDestination.Main) }
+    }
+
+    fun openUsbDebugLogs() {
+        _uiState.update {
+            it.copy(
+                currentScreen = RawBridgeScreen.Setup,
+                setupDestination = SetupDestination.UsbDebugLogs,
+            )
+        }
+    }
+
+    fun closeUsbDebugLogs() {
+        _uiState.update { it.copy(setupDestination = SetupDestination.Main) }
+    }
+
+    fun clearUsbDebugLogs() {
+        transferBackend.clearUsbDebugLogs()
     }
 
     fun setUsbModePreference(mode: UsbModePreference) {
@@ -108,7 +133,9 @@ class RawBridgeViewModel(
             persistUiPreferences(
                 latestUiPreferences.copy(hasCompletedOnboarding = true),
             )
-            val snapshot = transferBackend.usbConnectionMonitor.refresh(settings.usbModePreference)
+            val snapshot = withContext(Dispatchers.IO) {
+                transferBackend.usbConnectionMonitor.refresh(settings.usbModePreference)
+            }
             maybeAutoManageUsbSession(snapshot)
             syncUiFromBackend(
                 snackbarMessage = "配置已保存，可以返回主页开始导入。",
@@ -121,11 +148,21 @@ class RawBridgeViewModel(
     fun runConnectionCheck() {
         _uiState.update { it.copy(connectionCheckState = ConnectionCheckState.Checking) }
         viewModelScope.launch {
-            val snapshot = transferBackend.usbConnectionMonitor.refresh(
-                _uiState.value.config.usbModePreference,
+            UsbDebugLogger.d(
+                UiDebugTag,
+                "runConnectionCheck start preferredMode=${_uiState.value.config.usbModePreference.name}",
             )
+            val snapshot = withContext(Dispatchers.IO) {
+                transferBackend.usbConnectionMonitor.refresh(
+                    _uiState.value.config.usbModePreference,
+                )
+            }
             val result = buildConnectionResult(snapshot)
             maybeAutoManageUsbSession(snapshot)
+            UsbDebugLogger.d(
+                UiDebugTag,
+                "runConnectionCheck result connected=${snapshot.isConnected} permission=${snapshot.hasPermission} ready=${snapshot.isReadyToBrowse} message=${result.message}",
+            )
 
             _uiState.update { state ->
                 state.copy(
@@ -343,6 +380,9 @@ class RawBridgeViewModel(
             ReceiverServiceState.Ready -> {
                 pendingImportSelection = null
                 transferBackend.runtimeController.importSelected(state.selectedCaptureIds.toList())
+                _uiState.update {
+                    it.copy(snackbarMessage = "正在开始导出所选图片…")
+                }
             }
 
             ReceiverServiceState.Receiving -> _uiState.update {
@@ -459,7 +499,9 @@ class RawBridgeViewModel(
         viewModelScope.launch {
             transferBackend.settingsRepository.settings.collect { settings ->
                 latestSettings = settings
-                val snapshot = transferBackend.usbConnectionMonitor.refresh(settings.usbModePreference)
+                val snapshot = withContext(Dispatchers.IO) {
+                    transferBackend.usbConnectionMonitor.refresh(settings.usbModePreference)
+                }
                 maybeAutoManageUsbSession(snapshot)
                 syncUiFromBackend()
             }
@@ -508,9 +550,24 @@ class RawBridgeViewModel(
         viewModelScope.launch {
             transferBackend.usbImportSessionEngine.catalog.collect { catalog ->
                 latestCatalog = catalog
+                UsbDebugLogger.d(
+                    UiDebugTag,
+                    "catalog observed count=${catalog.size} raw=${catalog.count { it.fileType == StoredFileType.RAW }} jpeg=${catalog.count { it.fileType == StoredFileType.JPEG }}",
+                )
                 trimPersistedSelectionToCatalog()
                 runPendingImportIfNeeded()
                 syncUiFromBackend()
+            }
+        }
+    }
+
+    private fun observeUsbDebugLogs() {
+        viewModelScope.launch {
+            transferBackend.usbDebugLogs.collect { logs ->
+                val visibleLogs = visibleUsbDebugLogs(logs)
+                _uiState.update {
+                    it.copy(usbDebugLogs = visibleLogs.asReversed().map { entry -> entry.toUiModel() })
+                }
             }
         }
     }
@@ -539,11 +596,26 @@ class RawBridgeViewModel(
                 nextLibrary.any { it.id == selectedId }
             }
             val persistedMultiSelectMode = latestUiPreferences.isMultiSelectMode
-            val nextFilter = when {
+            val preferredFilter = when {
                 latestUiPreferences.captureFilter == CapturePickerFilter.Selected &&
                     (validSelection.isEmpty() || !persistedMultiSelectMode) ->
                     CapturePickerFilter.All
                 else -> latestUiPreferences.captureFilter
+            }
+            // The filter is persisted across launches. A camera can expose only RAW or only
+            // JPEG in the first incremental batch, so never let a stale filter hide every row.
+            val nextFilter = if (
+                nextLibrary.isNotEmpty() &&
+                nextLibrary.filteredBy(preferredFilter, validSelection).isEmpty()
+            ) {
+                CapturePickerFilter.All
+            } else {
+                preferredFilter
+            }
+            if (nextFilter != latestUiPreferences.captureFilter) {
+                persistUiPreferences(
+                    latestUiPreferences.copy(captureFilter = nextFilter),
+                )
             }
             val nextFocus = state.focusedCaptureId?.takeIf { focusedId ->
                 nextLibrary.any { it.id == focusedId }
@@ -551,7 +623,9 @@ class RawBridgeViewModel(
             val completedOnboarding = onboardingCompleted ?: latestUiPreferences.hasCompletedOnboarding
 
             state.copy(
-                isConfigured = latestSettings.isValid(),
+                // A default save directory is valid but does not mean the user has completed
+                // setup. Keep this in sync with the condition that starts USB scanning.
+                isConfigured = completedOnboarding && latestSettings.isValid(),
                 hasCompletedOnboarding = completedOnboarding,
                 themeMode = latestUiPreferences.themeMode,
                 currentScreen = forceScreen ?: state.currentScreen,
@@ -624,19 +698,37 @@ class RawBridgeViewModel(
 
     private fun maybeAutoManageUsbSession(snapshot: UsbConnectionSnapshot) {
         if (!latestUiPreferences.hasCompletedOnboarding || !latestSettings.isValid()) {
+            UsbDebugLogger.d(
+                UiDebugTag,
+                "autoManage skipped reason=not-configured onboarding=${latestUiPreferences.hasCompletedOnboarding} settingsValid=${latestSettings.isValid()}",
+            )
             return
         }
         if (!snapshot.isReadyToBrowse) {
+            UsbDebugLogger.d(
+                UiDebugTag,
+                "autoManage skipped reason=not-ready connected=${snapshot.isConnected} permission=${snapshot.hasPermission} browsable=${snapshot.isBrowsable} protocolReady=${snapshot.protocolReady}",
+            )
             return
         }
 
         when (latestRuntimeState.status) {
             ReceiverServiceStatus.Stopped,
             ReceiverServiceStatus.Error,
-            -> transferBackend.runtimeController.startReceiver()
+            -> {
+                UsbDebugLogger.d(
+                    UiDebugTag,
+                    "autoManage action=startReceiver runtime=${latestRuntimeState.status}",
+                )
+                transferBackend.runtimeController.startReceiver()
+            }
 
             ReceiverServiceStatus.Ready -> {
                 if (latestCatalog.isEmpty()) {
+                    UsbDebugLogger.d(
+                        UiDebugTag,
+                        "autoManage action=refreshCatalog runtime=${latestRuntimeState.status}",
+                    )
                     transferBackend.runtimeController.refreshCatalog()
                 }
             }
@@ -672,6 +764,8 @@ class RawBridgeViewModel(
     }
 
     companion object {
+        private const val UiDebugTag = "RawBridgeUsbDebugUi"
+
         fun factory(
             transferBackend: TransferBackend,
             uiPreferencesRepository: RawBridgeUiPreferencesRepository,
@@ -691,6 +785,8 @@ class RawBridgeViewModel(
         }
     }
 }
+
+internal fun visibleUsbDebugLogs(logs: List<UsbDebugLogEntry>): List<UsbDebugLogEntry> = logs
 
 private fun initialBackendUiState(): RawBridgeUiState {
     return RawBridgeUiState(
@@ -712,7 +808,9 @@ private fun ConnectionConfig.toReceiverSettings(): ReceiverSettings {
     val defaults = ReceiverSettings()
     return ReceiverSettings(
         usbModePreference = usbModePreference,
-        saveRoot = saveDirectory.ifBlank { defaults.saveRoot },
+        saveRoot = StoragePolicyPlanner.normalizeSaveRoot(
+            saveDirectory.ifBlank { defaults.saveRoot },
+        ),
         autoCreateDateFolder = autoCreateDateFolder,
         splitRawAndJpeg = splitRawAndJpeg,
         clearPreviewCacheOnDisconnect = clearPreviewCacheOnDisconnect,
@@ -726,7 +824,7 @@ private fun ReceiverSettings.isValid(): Boolean {
 private fun ReceiverRuntimeState.toUiState(): ReceiverServiceState {
     return when (status) {
         ReceiverServiceStatus.Stopped -> ReceiverServiceState.Stopped
-        ReceiverServiceStatus.Starting -> ReceiverServiceState.Ready
+        ReceiverServiceStatus.Starting -> ReceiverServiceState.Stopped
         ReceiverServiceStatus.Ready -> ReceiverServiceState.Ready
         ReceiverServiceStatus.Receiving -> ReceiverServiceState.Receiving
         ReceiverServiceStatus.Error -> ReceiverServiceState.Stopped
@@ -747,12 +845,12 @@ private fun buildConnectionResult(snapshot: UsbConnectionSnapshot): ConnectionCh
 
         !snapshot.isBrowsable -> ConnectionCheckState.Result(
             success = false,
-            message = snapshot.unavailableReason ?: "当前 USB 模式暂时不可浏览，请切换到支持的 MTP/PTP 模式。",
+            message = snapshot.unavailableReason ?: "当前 USB 模式暂时不可浏览，请切换到支持的 MTP 模式。",
         )
 
         else -> ConnectionCheckState.Result(
             success = true,
-            message = "USB 已就绪，当前模式 ${snapshot.usbModeLabel ?: "MTP/PTP"}。",
+            message = "USB 已就绪，当前模式 ${snapshot.usbModeLabel ?: "MTP"}。",
         )
     }
 }
@@ -780,7 +878,7 @@ private fun buildConnectionCheckState(
         )
         !snapshot.isBrowsable -> ConnectionCheckState.Result(
             success = false,
-            message = snapshot.unavailableReason ?: "当前 USB 模式暂时不可浏览，请切换到支持的 MTP/PTP 模式。",
+            message = snapshot.unavailableReason ?: "当前 USB 模式暂时不可浏览，请切换到支持的 MTP 模式。",
         )
         hasCatalog || runtimeState.status == ReceiverServiceStatus.Ready ||
             runtimeState.status == ReceiverServiceStatus.Receiving -> ConnectionCheckState.Result(
@@ -968,3 +1066,19 @@ private fun List<CapturePreviewItem>.filteredBy(
     CapturePickerFilter.Jpeg -> filter { it.fileType == CaptureFileType.Jpeg }
     CapturePickerFilter.Selected -> filter { it.id in selectedIds }
 }
+
+private fun UsbDebugLogEntry.toUiModel(): UsbDebugLogLine {
+    return UsbDebugLogLine(
+        id = id,
+        time = timestampMillis.toLocalDateTime().format(usbDebugTimeFormatter),
+        level = when (level) {
+            UsbDebugLogLevel.Debug -> "DEBUG"
+            UsbDebugLogLevel.Warn -> "WARN"
+            UsbDebugLogLevel.Error -> "ERROR"
+        },
+        tag = tag,
+        message = message,
+    )
+}
+
+private val usbDebugTimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")

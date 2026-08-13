@@ -16,7 +16,7 @@
 
 Snoy-RawBridge 是一个面向索尼相机的 Android 有线传图应用，支持先浏览缩略图，再按需导入选中的 RAW / JPEG 原文件。
 
-它围绕有线工作流设计：缩略图优先浏览、MTP 作为主路径、PTP 作为兼容路径，同时避免把整张存储卡完整镜像到手机。
+它围绕有线工作流设计：缩略图优先浏览、MTP 作为唯一传输路径，同时避免把整张存储卡完整镜像到手机。
 
 ## 项目简介
 
@@ -34,7 +34,7 @@ Snoy-RawBridge 面向希望在 Android 手机上直接浏览相机内容、并�
 
 - 面向 Android USB Host / OTG 的有线 USB 工作流
 - 适配索尼相机场景的浏览与导入体验
-- MTP 主路径，保留 PTP 兼容能力
+- 仅支持 MTP 传输模式
 - RAW / JPEG 缩略图优先浏览
 - 支持多选、筛选和批量导入
 - 支持导入进度、停止导入和历史记录
@@ -88,7 +88,7 @@ adb install -r app\build\outputs\apk\release\app-release.apk
 - Jetpack Compose
 - Material 3
 - Android USB Host API
-- MTP / PTP 浏览与导入链路
+- MTP 浏览与导入链路
 - Room
 - DataStore
 - Coil
@@ -104,8 +104,7 @@ icon.svg            图标源文件
 
 ## 兼容性说明
 
-- MTP 是当前的主路径，也是默认推荐模式。
-- PTP 保留为兼容路径，不同机型或 USB 模式下表现可能不同。
+- MTP 是当前唯一支持且默认推荐的传输模式。
 - 大容量存储卡下，完整图库加载速度仍会受到相机端枚举速度影响，即使当前已经支持缩略图增量出图。
 
 ## 作者

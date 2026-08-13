@@ -9,10 +9,12 @@ data class UsbConnectionSnapshot(
     val usbModeLabel: String? = null,
     val hasPermission: Boolean = false,
     val isBrowsable: Boolean = false,
+    val protocolReady: Boolean = false,
+    val browseBackendLabel: String? = null,
     val unavailableReason: String? = null,
 ) {
     val isReadyToBrowse: Boolean
-        get() = isConnected && hasPermission && isBrowsable
+        get() = isConnected && hasPermission && isBrowsable && protocolReady
 }
 
 interface UsbConnectionMonitor {

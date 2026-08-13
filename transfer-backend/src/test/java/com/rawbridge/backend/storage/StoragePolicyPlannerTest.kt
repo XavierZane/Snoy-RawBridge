@@ -45,4 +45,40 @@ class StoragePolicyPlannerTest {
         assertTrue(resolved.startsWith("A7M3_0001_20260623_101530"))
         assertTrue(resolved.endsWith(".ARW"))
     }
+
+    @Test
+    fun `media files in image public roots use the image collection`() {
+        assertEquals(
+            StorageMediaCollection.Images,
+            StoragePolicyPlanner.mediaStoreCollectionKind(
+                fileType = StoredFileType.JPEG,
+                relativePath = "Pictures/RAWBridge/",
+            ),
+        )
+        assertEquals(
+            StorageMediaCollection.Images,
+            StoragePolicyPlanner.mediaStoreCollectionKind(
+                fileType = StoredFileType.JPEG,
+                relativePath = "DCIM/RAWBridge/",
+            ),
+        )
+        assertEquals(
+            StorageMediaCollection.Files,
+            StoragePolicyPlanner.mediaStoreCollectionKind(
+                fileType = StoredFileType.JPEG,
+                relativePath = "Download/RAWBridge/",
+            ),
+        )
+    }
+
+    @Test
+    fun `raw uses the image collection in Pictures`() {
+        assertEquals(
+            StorageMediaCollection.Images,
+            StoragePolicyPlanner.mediaStoreCollectionKind(
+                fileType = StoredFileType.RAW,
+                relativePath = "Pictures/RAWBridge/",
+            ),
+        )
+    }
 }

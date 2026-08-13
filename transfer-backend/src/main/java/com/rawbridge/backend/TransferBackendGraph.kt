@@ -10,6 +10,7 @@ import com.rawbridge.backend.history.db.TransferDatabase
 import com.rawbridge.backend.platform.AndroidUsbConnectionMonitor
 import com.rawbridge.backend.platform.UsbConnectionMonitor
 import com.rawbridge.backend.platform.usb.AndroidUsbImportSessionEngine
+import com.rawbridge.backend.platform.usb.UsbBulkMtpClient
 import com.rawbridge.backend.platform.usb.UsbImportSessionEngine
 import com.rawbridge.backend.storage.IncomingFileStore
 import com.rawbridge.backend.storage.MediaStoreIncomingFileStore
@@ -45,11 +46,16 @@ internal object TransferBackendGraph {
 
         val settingsRepository = PreferencesTransferSettingsRepository(context)
         val historyRepository = RoomTransferHistoryRepository(database.historyDao())
-        val usbConnectionMonitor = AndroidUsbConnectionMonitor(context)
+        val browseClient = UsbBulkMtpClient(context)
+        val usbConnectionMonitor = AndroidUsbConnectionMonitor(
+            context = context,
+            browseClient = browseClient,
+        )
         val incomingFileStore = MediaStoreIncomingFileStore(context)
         val usbImportSessionEngine = AndroidUsbImportSessionEngine(
             context = context,
             usbConnectionMonitor = usbConnectionMonitor,
+            browseClient = browseClient,
         )
         val runtimeController = AndroidTransferRuntimeController(context)
 

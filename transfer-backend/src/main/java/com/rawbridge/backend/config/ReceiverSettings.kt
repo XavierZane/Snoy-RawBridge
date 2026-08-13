@@ -2,7 +2,6 @@ package com.rawbridge.backend.config
 
 enum class UsbModePreference {
     MTP,
-    PTP,
 }
 
 data class ReceiverSettings(

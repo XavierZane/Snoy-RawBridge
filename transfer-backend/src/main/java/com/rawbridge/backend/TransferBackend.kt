@@ -2,6 +2,8 @@ package com.rawbridge.backend
 
 import android.content.Context
 import com.rawbridge.backend.config.TransferSettingsRepository
+import com.rawbridge.backend.debug.UsbDebugLogEntry
+import com.rawbridge.backend.debug.UsbDebugLogger
 import com.rawbridge.backend.history.TransferHistoryRepository
 import com.rawbridge.backend.platform.UsbConnectionMonitor
 import com.rawbridge.backend.platform.usb.UsbImportSessionEngine
@@ -19,6 +21,13 @@ class TransferBackend internal constructor(
 ) {
     val runtimeState: StateFlow<com.rawbridge.backend.runtime.ReceiverRuntimeState>
         get() = TransferRuntimeBus.state
+
+    val usbDebugLogs: StateFlow<List<UsbDebugLogEntry>>
+        get() = UsbDebugLogger.logs
+
+    fun clearUsbDebugLogs() {
+        UsbDebugLogger.clear()
+    }
 
     companion object {
         @Volatile

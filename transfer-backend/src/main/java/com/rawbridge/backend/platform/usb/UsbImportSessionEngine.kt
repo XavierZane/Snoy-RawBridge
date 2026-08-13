@@ -2,7 +2,7 @@ package com.rawbridge.backend.platform.usb
 
 import com.rawbridge.backend.config.ReceiverSettings
 import com.rawbridge.backend.storage.StoredFileType
-import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
 data class UsbImportSessionStartRequest(
@@ -67,7 +67,7 @@ sealed interface UsbImportSessionState {
 
 interface UsbImportSessionEngine {
     val state: StateFlow<UsbImportSessionState>
-    val events: SharedFlow<UsbImportSessionEvent>
+    val events: Flow<UsbImportSessionEvent>
     val catalog: StateFlow<List<UsbCameraCatalogItem>>
 
     suspend fun start(request: UsbImportSessionStartRequest)

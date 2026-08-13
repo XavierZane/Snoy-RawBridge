@@ -3,14 +3,16 @@ package com.rawbridge.backend.storage
 import android.content.ContentValues
 import android.content.Context
 import android.media.MediaScannerConnection
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import com.rawbridge.backend.debug.UsbDebugLogger
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 internal class MediaStoreIncomingFileStore(
     private val appContext: Context,
@@ -30,6 +32,10 @@ internal class MediaStoreIncomingFileStore(
         val byteCount = source.use { input ->
             tempFile.outputStream().use { output -> input.copyTo(output) }
         }
+        UsbDebugLogger.d(
+            DebugTag,
+            "save incoming file staging-ready name=${request.originalFileName} bytes=$byteCount relativePath=$relativePath fileType=$fileType",
+        )
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -62,11 +68,15 @@ internal class MediaStoreIncomingFileStore(
         byteCount: Long,
     ): SavedIncomingFile {
         val resolver = appContext.contentResolver
+        val collection = mediaStoreCollection(
+            fileType = fileType,
+            relativePath = relativePath,
+        )
         val displayName = StoragePolicyPlanner.resolveConflict(
             originalFileName = request.originalFileName,
             nameExists = { candidate ->
                 resolver.query(
-                    MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+                    collection,
                     arrayOf(MediaStore.MediaColumns._ID),
                     "${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
                     arrayOf(relativePath, candidate),
@@ -83,14 +93,17 @@ internal class MediaStoreIncomingFileStore(
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
 
-        val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         val uri = resolver.insert(collection, values)
-            ?: throw IOException("MediaStore 插入失败")
+            ?: throw IOException("MediaStore 插入失败，目标目录可能无效。")
+        UsbDebugLogger.d(
+            DebugTag,
+            "save incoming file mediastore-inserted name=$displayName relativePath=$relativePath uri=$uri",
+        )
 
         try {
             resolver.openOutputStream(uri, "w")?.use { output ->
                 tempFile.inputStream().use { input -> input.copyTo(output) }
-            } ?: throw IOException("无法打开目标输出流")
+            } ?: throw IOException("无法打开 MediaStore 输出流。")
 
             resolver.update(
                 uri,
@@ -98,7 +111,16 @@ internal class MediaStoreIncomingFileStore(
                 null,
                 null,
             )
+            UsbDebugLogger.d(
+                DebugTag,
+                "save incoming file mediastore-success name=$displayName bytes=$byteCount uri=$uri",
+            )
         } catch (error: Throwable) {
+            UsbDebugLogger.e(
+                DebugTag,
+                "save incoming file mediastore-failed name=$displayName uri=$uri",
+                error,
+            )
             resolver.delete(uri, null, null)
             throw error
         }
@@ -120,7 +142,7 @@ internal class MediaStoreIncomingFileStore(
         byteCount: Long,
     ): SavedIncomingFile {
         val root = appContext.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
-            ?: throw IOException("无法访问应用外部图片目录")
+            ?: throw IOException("无法访问应用外部图片目录。")
         val targetDirectory = File(root, relativePath.removePrefix("Pictures/").trim('/'))
         if (!targetDirectory.exists() && !targetDirectory.mkdirs()) {
             throw IOException("无法创建目标目录: ${targetDirectory.absolutePath}")
@@ -140,14 +162,30 @@ internal class MediaStoreIncomingFileStore(
             arrayOf(request.mimeType ?: defaultMimeType(fileType)),
             null,
         )
+        UsbDebugLogger.d(
+            DebugTag,
+            "save incoming file legacy-success name=$displayName path=${targetFile.absolutePath} bytes=$byteCount",
+        )
 
         return SavedIncomingFile(
             displayName = displayName,
             relativePath = targetDirectory.absolutePath,
-            contentUri = targetFile.toURI().toString(),
+            contentUri = Uri.fromFile(targetFile).toString(),
             sizeBytes = byteCount,
             fileType = fileType,
         )
+    }
+
+    private fun mediaStoreCollection(
+        fileType: StoredFileType,
+        relativePath: String,
+    ): Uri {
+        return when (StoragePolicyPlanner.mediaStoreCollectionKind(fileType, relativePath)) {
+            StorageMediaCollection.Images ->
+                MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            StorageMediaCollection.Files ->
+                MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        }
     }
 
     private fun defaultMimeType(fileType: StoredFileType): String {
@@ -156,5 +194,9 @@ internal class MediaStoreIncomingFileStore(
             StoredFileType.RAW -> "image/x-sony-arw"
             StoredFileType.OTHER -> "application/octet-stream"
         }
+    }
+
+    private companion object {
+        private const val DebugTag = "RawBridgeUsbDebug"
     }
 }

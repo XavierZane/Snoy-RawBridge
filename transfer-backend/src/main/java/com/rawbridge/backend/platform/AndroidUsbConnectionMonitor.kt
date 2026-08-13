@@ -9,17 +9,26 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
 import com.rawbridge.backend.config.UsbModePreference
-import com.rawbridge.backend.platform.usb.probeBrowseSupport
+import com.rawbridge.backend.debug.UsbDebugLogger
+import com.rawbridge.backend.platform.usb.CameraBrowseClient
+import com.rawbridge.backend.platform.usb.DebugMtpSimulator
+import com.rawbridge.backend.platform.usb.buildModeLabel
 import com.rawbridge.backend.platform.usb.selectRawBridgeCameraDevice
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 internal class AndroidUsbConnectionMonitor(
     context: Context,
+    private val browseClient: CameraBrowseClient,
 ) : UsbConnectionMonitor {
     private val appContext = context.applicationContext
     private val usbManager = appContext.getSystemService(Context.USB_SERVICE) as UsbManager
+    private val monitorScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val permissionIntent = PendingIntent.getBroadcast(
         appContext,
         30101,
@@ -27,7 +36,7 @@ internal class AndroidUsbConnectionMonitor(
         PendingIntent.FLAG_UPDATE_CURRENT or pendingIntentMutabilityFlag(),
     )
 
-    private val _snapshots = MutableStateFlow(buildSnapshot(UsbModePreference.MTP))
+    private val _snapshots = MutableStateFlow(disconnectedSnapshot(UsbModePreference.MTP))
     override val snapshots: StateFlow<UsbConnectionSnapshot> = _snapshots.asStateFlow()
 
     private var preferredMode: UsbModePreference = UsbModePreference.MTP
@@ -39,7 +48,14 @@ internal class AndroidUsbConnectionMonitor(
                 UsbManager.ACTION_USB_DEVICE_ATTACHED,
                 UsbManager.ACTION_USB_DEVICE_DETACHED,
                 -> {
-                    _snapshots.value = buildSnapshot(preferredMode)
+                    val pendingResult = goAsync()
+                    monitorScope.launch {
+                        try {
+                            _snapshots.value = safeBuildSnapshot(preferredMode)
+                        } finally {
+                            pendingResult.finish()
+                        }
+                    }
                 }
             }
         }
@@ -57,6 +73,7 @@ internal class AndroidUsbConnectionMonitor(
             @Suppress("DEPRECATION")
             appContext.registerReceiver(receiver, filter)
         }
+        refreshAsync(preferredMode)
     }
 
     override fun current(): UsbConnectionSnapshot = snapshots.value
@@ -65,21 +82,49 @@ internal class AndroidUsbConnectionMonitor(
         preferredMode: UsbModePreference,
     ): UsbConnectionSnapshot {
         this.preferredMode = preferredMode
-        val snapshot = buildSnapshot(preferredMode)
+        val snapshot = safeBuildSnapshot(preferredMode)
         _snapshots.value = snapshot
         return snapshot
+    }
+
+    private fun safeBuildSnapshot(
+        preferredMode: UsbModePreference,
+    ): UsbConnectionSnapshot {
+        return runCatching {
+            buildSnapshot(preferredMode)
+        }.getOrElse { error ->
+            UsbDebugLogger.e(DebugTag, "usb snapshot build failed", error)
+            disconnectedSnapshot(
+                preferredMode = preferredMode,
+                unavailableReason = error.message ?: "USB 检测失败，请重新插拔数据线后再试。",
+            )
+        }
     }
 
     private fun buildSnapshot(
         preferredMode: UsbModePreference,
     ): UsbConnectionSnapshot {
+        if (DebugMtpSimulator.isEnabled(appContext)) {
+            UsbDebugLogger.d(DebugTag, "snapshot source=simulated-mtp")
+            return UsbConnectionSnapshot(
+                isConnected = true,
+                deviceName = "Simulated Sony Camera",
+                usbModeLabel = "MTP (simulated)",
+                hasPermission = true,
+                isBrowsable = true,
+                protocolReady = true,
+                browseBackendLabel = "Debug simulated MTP",
+            )
+        }
         val device = usbManager.selectRawBridgeCameraDevice()
             ?: return UsbConnectionSnapshot(
                 isConnected = false,
                 usbModeLabel = preferredMode.name,
                 hasPermission = false,
                 isBrowsable = false,
-                unavailableReason = "\u672a\u68c0\u6d4b\u5230\u901a\u8fc7 USB \u8fde\u63a5\u7684\u76f8\u673a\uff0c\u8bf7\u68c0\u67e5\u6570\u636e\u7ebf\u548c OTG\u3002",
+                protocolReady = false,
+                browseBackendLabel = null,
+                unavailableReason = "未检测到通过 USB 连接的相机，请检查数据线和 OTG。",
             )
 
         val hasPermission = usbManager.hasPermission(device)
@@ -87,24 +132,45 @@ internal class AndroidUsbConnectionMonitor(
             usbManager.requestPermission(device, permissionIntent)
         }
 
+        val fallbackModeLabel = usbManager.buildModeLabel(device, preferredMode)
         val probeResult = if (hasPermission) {
-            usbManager.probeBrowseSupport(device, preferredMode)
+            runCatching {
+                browseClient.probe(device, preferredMode)
+            }.onFailure { error ->
+                UsbDebugLogger.e(
+                    DebugTag,
+                    "usb probe failed device=${device.deviceName} mode=${preferredMode.name}",
+                    error,
+                )
+            }.getOrNull()
         } else {
             null
         }
+        val protocolReady = probeResult?.protocolReady == true
+        val unavailableReason = when {
+            !hasPermission ->
+                "检测到相机，但还没有 USB 访问权限，请在系统弹窗中授权。"
+            probeResult != null && !probeResult.protocolReady ->
+                probeResult.errorMessage ?: defaultBrowseFailureReason(preferredMode)
+            probeResult == null && hasPermission ->
+                defaultBrowseFailureReason(preferredMode)
+            else -> null
+        }
+
+        UsbDebugLogger.d(
+            DebugTag,
+            "snapshot device=${device.deviceName} mode=${probeResult?.modeLabel ?: fallbackModeLabel} preferred=${preferredMode.name} hasPermission=$hasPermission protocolReady=$protocolReady backend=${probeResult?.browseBackendLabel ?: "none"}",
+        )
 
         return UsbConnectionSnapshot(
             isConnected = true,
             deviceName = device.productName ?: buildFallbackDeviceName(device),
-            usbModeLabel = probeResult?.modeLabel ?: preferredMode.name,
+            usbModeLabel = probeResult?.modeLabel ?: fallbackModeLabel,
             hasPermission = hasPermission,
-            isBrowsable = probeResult?.isBrowsable == true,
-            unavailableReason = when {
-                !hasPermission ->
-                    "\u68c0\u6d4b\u5230\u76f8\u673a\uff0c\u4f46\u8fd8\u6ca1\u6709 USB \u8bbf\u95ee\u6743\u9650\uff0c\u8bf7\u5728\u7cfb\u7edf\u5f39\u7a97\u4e2d\u6388\u6743\u3002"
-                probeResult?.isBrowsable == false -> probeResult.errorMessage
-                else -> null
-            },
+            isBrowsable = protocolReady,
+            protocolReady = protocolReady,
+            browseBackendLabel = probeResult?.browseBackendLabel,
+            unavailableReason = unavailableReason,
         )
     }
 
@@ -122,7 +188,35 @@ internal class AndroidUsbConnectionMonitor(
         }
     }
 
+    private fun defaultBrowseFailureReason(
+        preferredMode: UsbModePreference,
+    ): String {
+        return "USB 已连接，但低层 MTP 探测失败，请重新检测或查看调试日志。"
+    }
+
+    private fun refreshAsync(preferredMode: UsbModePreference) {
+        monitorScope.launch {
+            _snapshots.value = safeBuildSnapshot(preferredMode)
+        }
+    }
+
+    private fun disconnectedSnapshot(
+        preferredMode: UsbModePreference,
+        unavailableReason: String = "未检测到通过 USB 连接的相机，请检查数据线和 OTG。",
+    ): UsbConnectionSnapshot {
+        return UsbConnectionSnapshot(
+            isConnected = false,
+            usbModeLabel = preferredMode.name,
+            hasPermission = false,
+            isBrowsable = false,
+            protocolReady = false,
+            browseBackendLabel = null,
+            unavailableReason = unavailableReason,
+        )
+    }
+
     private companion object {
+        private const val DebugTag = "RawBridgeUsbDebug"
         private const val ActionUsbPermission = "com.rawbridge.backend.USB_PERMISSION"
     }
 }
